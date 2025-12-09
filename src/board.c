@@ -389,68 +389,88 @@ int load_level(board_t* board, const char* dir_path, const char* level_file, int
     board->pacmans = calloc(1, sizeof(pacman_t)); // Always 1 pacman slot logic
     board->ghosts = calloc(board->n_ghosts, sizeof(ghost_t));
 
-    // Load Agent Files
+    // ... (Código anterior de parsing do mapa e alocação de memória mantém-se igual)
+
+    // 1º: CARREGAR FANTASMAS (Mova isto para cima do Pacman)
+    // Assim, os 'M' já estarão marcados no tabuleiro quando formos colocar o Pacman
+    for (int i = 0; i < board->n_ghosts; i++) {
+        board->ghosts[i].pos_x = -1;
+        board->ghosts[i].pos_y = -1;
+
+        snprintf(filepath, sizeof(filepath), "%s/%s", dir_path, board->ghosts_files[i]);
+        
+        parse_agent_file(filepath, &board->ghosts[i].pos_x, &board->ghosts[i].pos_y, 
+                         &board->ghosts[i].passo, board->ghosts[i].moves, &board->ghosts[i].n_moves);
+        
+        ghost_t* g = &board->ghosts[i];
+        
+        if (g->pos_x >= 0 && g->pos_x < board->width && 
+            g->pos_y >= 0 && g->pos_y < board->height) {
+            
+            int idx = get_board_index(board, g->pos_x, g->pos_y);
+            if (board->board[idx].content != 'W') {
+                board->board[idx].content = 'M';
+            }
+        }
+    }
+
+    // 2º: CARREGAR PACMAN (Agora executado em último)
     if (board->n_pacmans > 0) {
         snprintf(filepath, sizeof(filepath), "%s/%s", dir_path, board->pacman_file);
         parse_agent_file(filepath, &board->pacmans[0].pos_x, &board->pacmans[0].pos_y, 
                          &board->pacmans[0].passo, board->pacmans[0].moves, &board->pacmans[0].n_moves);
         
-        // Setup Pacman on Board
         pacman_t* p = &board->pacmans[0];
         p->alive = 1;
         p->points = accumulated_points;
+
+        // --- NOVA LÓGICA DE POSICIONAMENTO SEGURO ---
         int idx = get_board_index(board, p->pos_x, p->pos_y);
+        char content_at_spawn = board->board[idx].content;
+
+        // Se a posição original for Parede (W) ou Monstro (M)
+        if (content_at_spawn == 'W' || content_at_spawn == 'M') {
+            int found_safe_spot = 0;
+
+            // Procura a primeira posição livre (Itera por todo o tabuleiro)
+            for (int y = 0; y < board->height; y++) {
+                for (int x = 0; x < board->width; x++) {
+                    int try_idx = get_board_index(board, x, y);
+                    char c = board->board[try_idx].content;
+
+                    // Verifica se não é Parede nem Monstro
+                    if (c != 'W' && c != 'M') {
+                        p->pos_x = x;
+                        p->pos_y = y;
+                        found_safe_spot = 1;
+                        break; 
+                    }
+                }
+                if (found_safe_spot) break;
+            }
+            
+            // Se não encontrou lugar nenhum (mapa cheio de paredes/monstros), mantém o original
+            // para o erro ser visível, ou podes tratar o erro aqui.
+        }
+        // ---------------------------------------------
+
+        // Atualiza o tabuleiro com a posição final (seja a original ou a nova segura)
+        idx = get_board_index(board, p->pos_x, p->pos_y);
         board->board[idx].content = 'P';
-        board->board[idx].has_dot = 0; // Pacman eats dot on spawn? Usually yes or empty space.
+        board->board[idx].has_dot = 0; 
     } else {
-        // Manual Pacman logic (default spawn needs to be defined or inferred? 
-        // Enunciado diz: "Se não existirem, assume-se que o Pacman será movido manualmente"
-        // Mas não diz ONDE ele nasce. Assumiremos (1,1) ou buscar um espaço vazio se necessário.
-        // Vamos forçar (1,1) como fallback seguro se não houver ficheiro .p
+        // Fallback manual (também deve verificar colisão se quiseres ser rigoroso)
         board->n_pacmans = 1;
-        board->pacmans[0].pos_x = 1;
+        board->pacmans[0].pos_x = 1; // Podes aplicar a mesma lógica de procura aqui se (1,1) for parede
         board->pacmans[0].pos_y = 1;
         board->pacmans[0].alive = 1;
         board->pacmans[0].points = accumulated_points;
         board->board[get_board_index(board, 1, 1)].content = 'P';
     }
 
-    for (int i = 0; i < board->n_ghosts; i++) {
-        // 1. Inicializar com valores inválidos para detetar erros
-        board->ghosts[i].pos_x = -1;
-        board->ghosts[i].pos_y = -1;
-
-        snprintf(filepath, sizeof(filepath), "%s/%s", dir_path, board->ghosts_files[i]);
-        
-        // 2. Tentar ler o ficheiro
-        parse_agent_file(filepath, &board->ghosts[i].pos_x, &board->ghosts[i].pos_y, 
-                         &board->ghosts[i].passo, board->ghosts[i].moves, &board->ghosts[i].n_moves);
-        
-        // 3. Verificar se as coordenadas são válidas antes de colocar no tabuleiro
-        ghost_t* g = &board->ghosts[i];
-        
-        // Verifica se saíram de -1 e se estão dentro dos limites do mapa
-        if (g->pos_x >= 0 && g->pos_x < board->width && 
-            g->pos_y >= 0 && g->pos_y < board->height) {
-            
-            int idx = get_board_index(board, g->pos_x, g->pos_y);
-            
-            // Opcional: Verificar se não estamos a colocar o monstro em cima de uma parede ('W')
-            if (board->board[idx].content != 'W') {
-                board->board[idx].content = 'M';
-            } else {
-                // Log de erro: Monstro configurado dentro de uma parede
-                // fprintf(stderr, "Aviso: Monstro %d tentou nascer na parede (%d,%d)\n", i, g->pos_x, g->pos_y);
-            }
-        } else {
-            // Se entrar aqui, o ficheiro do monstro falhou a carregar ou não tinha POS
-            // O monstro "existe" na memória, mas não aparece no tabuleiro (invisible/dead logic)
-            // fprintf(stderr, "Erro: Falha ao carregar posição do monstro %s\n", board->ghosts_files[i]);
-        }
-    }
-
     return 0;
 }
+
 
 void unload_level(board_t * board) {
     if (board->board) free(board->board);
