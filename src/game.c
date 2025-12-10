@@ -39,48 +39,61 @@ void screen_refresh(board_t * game_board, int mode) {
 int play_board(board_t * game_board) {
     pacman_t* pacman = &game_board->pacmans[0];
     command_t* play = NULL;
-    command_t manual_command;
+    
+    // Declaração segura no topo
+    command_t manual_command; 
+    
     char action_char = '\0'; 
 
     // 1. Ler Input do Teclado
+    // Lemos na mesma para limpar o buffer do ncurses, mas vamos ignorar o valor
+    // se estivermos em modo automático.
     char input = get_input();
 
-    // 2. Determinar o próximo movimento (Manual ou Ficheiro)
-    if (pacman->n_moves == 0) { 
-        // --- Modo Manual ---
-        if (input != '\0') {
-            manual_command.command = input;
-            manual_command.turns = 1;
-            play = &manual_command;
-            action_char = input; 
+    // 2. SELEÇÃO DE MODO DE JOGO (AUTOMÁTICO vs MANUAL)
+    if (pacman->n_moves > 0) { 
+        // =======================================================
+        // MODO AUTOMÁTICO (FICHEIRO) - O TECLADO É IGNORADO
+        // =======================================================
+        
+        play = &pacman->moves[pacman->current_move % pacman->n_moves];
+        action_char = play->command; // A ação vem EXCLUSIVAMENTE do ficheiro
+        
+        // Verificação de Saída: Apenas se o FICHEIRO tiver 'Q'
+        if (action_char == 'Q') {
+             if (has_active_save) exit(EXIT_GAME_OVER);
+             return QUIT_GAME;
         }
     }
     else { 
-        // --- Modo Automático ---
-        play = &pacman->moves[pacman->current_move % pacman->n_moves];
-        action_char = play->command;
-    }
-
-    // -----------------------------------------------------------
-    // 3. VERIFICAÇÃO DE SAÍDA ('Q') - Teclado OU Ficheiro
-    // -----------------------------------------------------------
-    // Se o jogador clicou Q ... OU ... se o ficheiro diz Q
-    if (input == 'Q' || (play != NULL && play->command == 'Q')) {
+        // =======================================================
+        // MODO MANUAL (TECLADO) - O ÚNICO SÍTIO ONDE O TECLADO CONTA
+        // =======================================================
         
-        // Se estamos num processo Filho (Save Ativo), temos de avisar o Pai
-        if (has_active_save) {
-            exit(EXIT_GAME_OVER); 
+        // Verificação de Saída: Apenas aqui o teclado 'Q' funciona
+        if (input == 'Q') {
+            if (has_active_save) exit(EXIT_GAME_OVER);
+            return QUIT_GAME;
         }
-        
-        // Se somos o processo principal
-        return QUIT_GAME;
+
+        // Configurar comando manual
+        if (input != '\0') {
+            manual_command.command = input;
+            manual_command.turns = 1;
+            
+            play = &manual_command;
+            action_char = input; // A ação vem do teclado
+        }
     }
 
     // -----------------------------------------------------------
-    // 4. LÓGICA DE QUICKSAVE (Comando 'G')
+    // 3. LÓGICA DE QUICKSAVE (Comando 'G')
     // -----------------------------------------------------------
+    // O action_char agora reflete estritamente a fonte (Ficheiro OU Teclado, nunca misturado)
     if (action_char == 'G') {
+        
         if (has_active_save == 0) {
+            // Sou o Pai -> Faço o Save
             debug("Iniciando Quicksave (PID Pai: %d)...\n", getpid());
             
             pid_t pid = fork();
@@ -97,7 +110,8 @@ int play_board(board_t * game_board) {
                     int exit_code = WEXITSTATUS(status);
                     if (exit_code == EXIT_RESTORE) {
                         has_active_save = 0; 
-                        // Avança o índice para não repetir o 'G'
+                        
+                        // Avançar índice se for automático
                         if (pacman->n_moves > 0) pacman->current_move++;
                         
                         clear(); refresh(); screen_refresh(game_board, DRAW_MENU); 
@@ -112,22 +126,21 @@ int play_board(board_t * game_board) {
             else {
                 // === PROCESSO FILHO ===
                 has_active_save = 1; 
-                // Avança o índice para não ficar preso no 'G'
+                // Avançar índice se for automático
                 if (pacman->n_moves > 0) pacman->current_move++;
             }
         }
         else {
-            // Se já sou filho e leio 'G' no ficheiro, ignoro e avanço
-            if (pacman->n_moves > 0 && play != NULL && play->command == 'G') {
+            // Sou o Filho -> Ignoro o 'G'
+            // Avançar índice se for automático para não encravar
+            if (pacman->n_moves > 0) {
                  pacman->current_move++;
             }
         }
-        play = NULL; 
+        play = NULL; // 'G' não é movimento
     }
 
-    // -----------------------------------------------------------
-    // 5. MOVIMENTO DO PACMAN
-    // -----------------------------------------------------------
+    // 4. MOVIMENTO DO PACMAN
     if (play != NULL && play->command != 'G') {
         int result = move_pacman(game_board, 0, play);
         
@@ -139,10 +152,7 @@ int play_board(board_t * game_board) {
         }
     }
 
-    // -----------------------------------------------------------
-    // 6. RESTO DA LÓGICA (Fantasmas, etc.)
-    // -----------------------------------------------------------
-    // ... (O código dos fantasmas mantém-se igual) ...
+    // 5. FANTASMAS
     for (int i = 0; i < game_board->n_ghosts; i++) {
         ghost_t* ghost = &game_board->ghosts[i];
         if (ghost->n_moves > 0) {
@@ -150,6 +160,7 @@ int play_board(board_t * game_board) {
         }
     }
 
+    // 6. VERIFICAÇÃO FINAL
     if (!game_board->pacmans[0].alive) {
         if (has_active_save) {
             exit(EXIT_RESTORE);
