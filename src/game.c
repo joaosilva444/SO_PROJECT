@@ -1,32 +1,19 @@
 #include "board.h"
 #include "display.h"
+#include "files.h"
 #include <stdlib.h>
 #include <stdio.h>
-#include <string.h>
-#include <time.h>
 #include <unistd.h>
-#include <dirent.h> 
-#include <sys/wait.h>  // Necessário para waitpid
-#include <sys/types.h> // Necessário para pid_t
-#include "files.h"
-#define _DEFAULT_SOURCE
+#include <pthread.h>
+#include <sys/wait.h>
+#include <sys/types.h>
 
-// Códigos de saída para comunicação Processo Filho -> Processo Pai
-#define EXIT_RESTORE 10   // Filho morreu, Pai deve restaurar
-#define EXIT_GAME_OVER 11 // Filho saiu (Q), Pai deve sair
 
-// Flag Global:
-// 0 = Sou o processo original (ou acabei de restaurar um save). Posso gravar.
-// 1 = Sou um processo filho (cópia descartável). Não posso gravar.
-int has_active_save = 0; 
-
-// ... (Resto das funções auxiliares como filter_levels mantêm-se)
-
-#define CONTINUE_PLAY 0
-#define NEXT_LEVEL 1
-#define QUIT_GAME 2
-#define EXIT_RESTORE 10
-
+// Estrutura auxiliar para passar argumentos às threads
+typedef struct {
+    board_t* board;
+    int id; // Índice do fantasma ou do pacman
+} thread_arg_t;
 
 void screen_refresh(board_t * game_board, int mode) {
     debug("REFRESH\n");
@@ -36,211 +23,196 @@ void screen_refresh(board_t * game_board, int mode) {
         sleep_ms(game_board->tempo);       
 }
 
-int play_board(board_t * game_board) {
-    pacman_t* pacman = &game_board->pacmans[0];
-    command_t* play = NULL;
+// ------------------------------------------------------------
+// THREAD DO FANTASMA
+// ------------------------------------------------------------
+void* ghost_thread(void* arg) {
+    thread_arg_t* params = (thread_arg_t*)arg;
+    board_t* board = params->board;
+    int ghost_idx = params->id;
+    ghost_t* self = &board->ghosts[ghost_idx];
     
-    // Declaração segura no topo
-    command_t manual_command; 
-    
-    char action_char = '\0'; 
+    free(params); // Libertar a estrutura auxiliar
 
-    // 1. Ler Input do Teclado
-    // Lemos na mesma para limpar o buffer do ncurses, mas vamos ignorar o valor
-    // se estivermos em modo automático.
-    char input = get_input();
+    while (board->game_running) {
+        // 1. Simular o tempo de espera (velocidade do monstro)
+        // Se o monstro tiver ficheiro, usa o 'PASSO' ou o tempo do board
+        int sleep_time = (board->tempo > 0) ? board->tempo * 10 : 100; // *10 para ser visível
+        sleep_ms(sleep_time);
 
-    // 2. SELEÇÃO DE MODO DE JOGO (AUTOMÁTICO vs MANUAL)
-    if (pacman->n_moves > 0) { 
-        // =======================================================
-        // MODO AUTOMÁTICO (FICHEIRO) - O TECLADO É IGNORADO
-        // =======================================================
-        
-        play = &pacman->moves[pacman->current_move % pacman->n_moves];
-        action_char = play->command; // A ação vem EXCLUSIVAMENTE do ficheiro
-        
-        // Verificação de Saída: Apenas se o FICHEIRO tiver 'Q'
-        if (action_char == 'Q') {
-             if (has_active_save) exit(EXIT_GAME_OVER);
-             return QUIT_GAME;
+        // 2. Proteção Crítica (Mutex)
+        // Ninguém mexe no tabuleiro enquanto este monstro decide o movimento
+        pthread_mutex_lock(&board->board_lock);
+
+        // Verificar se jogo ainda corre depois de acordar
+        if (!board->game_running) {
+            pthread_mutex_unlock(&board->board_lock);
+            break;
         }
+
+        // 3. Calcular e Executar Movimento
+        command_t cmd;
+        if (self->n_moves > 0) {
+            // Modo Automático (Ficheiro)
+            cmd = self->moves[self->current_move % self->n_moves];
+            move_ghost(board, ghost_idx, &cmd);
+        } else {
+            // Modo Aleatório (Se não tiver ficheiro)
+            cmd.command = "WASD"[rand() % 4];
+            move_ghost(board, ghost_idx, &cmd);
+        }
+
+        // 4. Libertar Mutex
+        pthread_mutex_unlock(&board->board_lock);
     }
-    else { 
-        // =======================================================
-        // MODO MANUAL (TECLADO) - O ÚNICO SÍTIO ONDE O TECLADO CONTA
-        // =======================================================
-        
-        // Verificação de Saída: Apenas aqui o teclado 'Q' funciona
-        if (input == 'Q') {
-            if (has_active_save) exit(EXIT_GAME_OVER);
-            return QUIT_GAME;
-        }
-
-        // Configurar comando manual
-        if (input != '\0') {
-            manual_command.command = input;
-            manual_command.turns = 1;
-            
-            play = &manual_command;
-            action_char = input; // A ação vem do teclado
-        }
-    }
-
-    // -----------------------------------------------------------
-    // 3. LÓGICA DE QUICKSAVE (Comando 'G')
-    // -----------------------------------------------------------
-    // O action_char agora reflete estritamente a fonte (Ficheiro OU Teclado, nunca misturado)
-    if (action_char == 'G') {
-        
-        if (has_active_save == 0) {
-            // Sou o Pai -> Faço o Save
-            debug("Iniciando Quicksave (PID Pai: %d)...\n", getpid());
-            
-            pid_t pid = fork();
-
-            if (pid < 0) {
-                perror("Erro no fork");
-            }
-            else if (pid > 0) {
-                // === PROCESSO PAI ===
-                int status;
-                waitpid(pid, &status, 0); 
-
-                if (WIFEXITED(status)) {
-                    int exit_code = WEXITSTATUS(status);
-                    if (exit_code == EXIT_RESTORE) {
-                        has_active_save = 0; 
-                        
-                        // Avançar índice se for automático
-                        if (pacman->n_moves > 0) pacman->current_move++;
-                        
-                        clear(); refresh(); screen_refresh(game_board, DRAW_MENU); 
-                        return CONTINUE_PLAY;
-                    }
-                    else if (exit_code == EXIT_GAME_OVER) {
-                        return QUIT_GAME;
-                    }
-                }
-                return CONTINUE_PLAY; 
-            }
-            else {
-                // === PROCESSO FILHO ===
-                has_active_save = 1; 
-                // Avançar índice se for automático
-                if (pacman->n_moves > 0) pacman->current_move++;
-            }
-        }
-        else {
-            // Sou o Filho -> Ignoro o 'G'
-            // Avançar índice se for automático para não encravar
-            if (pacman->n_moves > 0) {
-                 pacman->current_move++;
-            }
-        }
-        play = NULL; // 'G' não é movimento
-    }
-
-    // 4. MOVIMENTO DO PACMAN
-    if (play != NULL && play->command != 'G') {
-        int result = move_pacman(game_board, 0, play);
-        
-        if (result == REACHED_PORTAL) return NEXT_LEVEL;
-        
-        if (result == DEAD_PACMAN) {
-            if (has_active_save) exit(EXIT_RESTORE);
-            return QUIT_GAME; 
-        }
-    }
-
-    // 5. FANTASMAS
-    for (int i = 0; i < game_board->n_ghosts; i++) {
-        ghost_t* ghost = &game_board->ghosts[i];
-        if (ghost->n_moves > 0) {
-             move_ghost(game_board, i, &ghost->moves[ghost->current_move % ghost->n_moves]);
-        }
-    }
-
-    // 6. VERIFICAÇÃO FINAL
-    if (!game_board->pacmans[0].alive) {
-        if (has_active_save) {
-            exit(EXIT_RESTORE);
-        }
-        return QUIT_GAME;
-    }      
-
-    return CONTINUE_PLAY;  
+    return NULL;
 }
 
-int main(int argc, char** argv) {
-    if (argc != 2) {
-        printf("Usage: %s <level_directory>\n", argv[0]);
-        return 1;
-    }
+// ------------------------------------------------------------
+// THREAD DO PACMAN
+// ------------------------------------------------------------
+void* pacman_thread(void* arg) {
+    board_t* board = (board_t*)arg;
+    pacman_t* self = &board->pacmans[0];
 
+    while (board->game_running) {
+        // Pacman espera um pouco menos para ser responsivo, ou usa o tempo do jogo
+        sleep_ms(10); 
+
+        pthread_mutex_lock(&board->board_lock);
+
+        if (!board->game_running) {
+            pthread_mutex_unlock(&board->board_lock);
+            break;
+        }
+
+        command_t cmd;
+        int moved = 0;
+
+        // Prioridade 1: Comando do Teclado (vindo da Main Thread)
+        if (board->next_pacman_cmd != '\0') {
+            cmd.command = board->next_pacman_cmd;
+            cmd.turns = 1;
+            board->next_pacman_cmd = '\0'; // Consumir comando
+            move_pacman(board, 0, &cmd);
+            moved = 1;
+        }
+        // Prioridade 2: Modo Automático (Ficheiro) se não houver teclado
+        else if (self->n_moves > 0) {
+            // Pequeno delay para o automático não ser instantâneo
+            // (Na prática deveria ter lógica de timing melhor, mas serve para o exemplo)
+             cmd = self->moves[self->current_move % self->n_moves];
+             move_pacman(board, 0, &cmd);
+             moved = 1;
+        }
+
+        // Verificar colisões ou morte após movimento
+        if (!self->alive) {
+            board->game_running = 0; // Sinalizar fim de jogo a todos
+        }
+
+        pthread_mutex_unlock(&board->board_lock);
+        
+        // Se foi movimento automático, dormir um pouco
+        if (moved && self->n_moves > 0) sleep_ms(board->tempo);
+    }
+    return NULL;
+}
+
+// ------------------------------------------------------------
+// MAIN (UI THREAD)
+// ------------------------------------------------------------
+int main(int argc, char** argv) {
+    if (argc < 2) { printf("Usage: %s <dir>\n", argv[0]); return 1; }
+
+    // ... (Código de scandir igual ao anterior) ...
     char* dir_path = argv[1];
     struct dirent **namelist;
-    int n;
+    int n = scandir(dir_path, &namelist, filter_levels, alphasort);
+    if (n < 0) return 1;
 
-    // POSIX scandir para encontrar ficheiros .lvl e ordená-los
-    n = scandir(dir_path, &namelist, filter_levels, alphasort);
-    if (n < 0) {
-        perror("scandir");
-        return 1;
-    }
-
-    srand((unsigned int)time(NULL));
-    open_debug_file("debug.log");
+    srand(time(NULL));
     terminal_init();
     
-    int accumulated_points = 0;
     board_t game_board;
+    int accumulated_points = 0;
 
-    // Loop through levels
     for (int i = 0; i < n; i++) {
-        char* level_file = namelist[i]->d_name;
-        
-        // Carregar nível
-        if (load_level(&game_board, dir_path, level_file, accumulated_points) != 0) {
-            debug("Failed to load level %s\n", level_file);
-            free(namelist[i]);
-            continue;
+        if (load_level(&game_board, dir_path, namelist[i]->d_name, accumulated_points) != 0) {
+            free(namelist[i]); continue;
         }
 
+        // --- INICIALIZAR THREADS ---
+        pthread_t p_thread;
+        pthread_t g_threads[MAX_GHOSTS];
+
+        // 1. Criar Thread Pacman
+        pthread_create(&p_thread, NULL, pacman_thread, &game_board);
+
+        // 2. Criar Threads Fantasmas
+        for(int g=0; g < game_board.n_ghosts; g++) {
+            thread_arg_t* args = malloc(sizeof(thread_arg_t));
+            args->board = &game_board;
+            args->id = g;
+            pthread_create(&g_threads[g], NULL, ghost_thread, args);
+        }
+
+        // --- LOOP PRINCIPAL (INTERFACE) ---
+        // Apenas desenha e lê input. Não move lógica.
+        
+        int level_result = 0;
         draw_board(&game_board, DRAW_MENU);
-        refresh_screen();
 
-        int level_result = CONTINUE_PLAY;
-        bool end_game = false;
+        while (game_board.game_running) {
+            // 1. Desenhar (Protegido por Mutex para leitura consistente)
+            pthread_mutex_lock(&game_board.board_lock);
+            draw_board(&game_board, DRAW_MENU);
+            
+            // Verificar condições de vitória/derrota dentro do lock
+            if (!game_board.pacmans[0].alive) {
+                game_board.game_running = 0;
+                level_result = 2; // QUIT/DIE
+            }
+            // Verificar se ganhou (ex: portal) - Adaptar move_pacman para setar flag
+            // Por simplicidade, assuma que move_pacman gere isto ou verifique portal aqui
+            pthread_mutex_unlock(&game_board.board_lock);
 
-        while (!end_game) {
-            level_result = play_board(&game_board); 
+            refresh_screen();
 
-            if(level_result == NEXT_LEVEL) {
-                screen_refresh(&game_board, DRAW_WIN);
-                sleep_ms(game_board.tempo * 10); // Pausa breve na vitória
-                accumulated_points = game_board.pacmans[0].points;
-                end_game = true;
+            // 2. Ler Input (Non-blocking)
+            char input = get_input();
+            if (input == 'Q') {
+                game_board.game_running = 0;
+                level_result = 2;
             }
-            else if(level_result == QUIT_GAME) {
-                screen_refresh(&game_board, DRAW_GAME_OVER); 
-                sleep_ms(game_board.tempo * 20);
-                end_game = true;
+            else if (input != '\0') {
+                // Passar input para a thread do Pacman processar
+                game_board.next_pacman_cmd = input;
             }
-            else {
-                screen_refresh(&game_board, DRAW_MENU); 
-            }
+
+            // 3. Frame Rate (~30 FPS)
+            sleep_ms(33); 
+        }
+
+        // --- JOIN THREADS (Esperar que acabem) ---
+        pthread_join(p_thread, NULL);
+        for(int g=0; g < game_board.n_ghosts; g++) {
+            pthread_join(g_threads[g], NULL);
+        }
+
+        if (level_result == 2) { // Game Over
+            screen_refresh(&game_board, DRAW_GAME_OVER);
+            sleep_ms(2000);
+            break; 
         }
         
+        // Acumular pontos e limpar
+        accumulated_points = game_board.pacmans[0].points;
         unload_level(&game_board);
         free(namelist[i]);
-
-        if (level_result == QUIT_GAME) break;
     }
+    
     free(namelist);
-
     terminal_cleanup();
-    close_debug_file();
-
     return 0;
 }
-

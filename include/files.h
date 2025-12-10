@@ -7,6 +7,8 @@
 /* Carrega um nível a partir de ficheiros para a estrutura board */
 int load_level(board_t* board, const char* dir_path, const char* level_file, int accumulated_points);
 
+void unload_level(board_t * board);
+
 /* Filtro para o scandir encontrar ficheiros .lvl */
 int filter_levels(const struct dirent *entry);
 

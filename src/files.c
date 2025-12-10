@@ -6,9 +6,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#define _DEFAULT_SOURCE
-// ou em sistemas mais antigos: #define _BSD_SOURCE
-#include <dirent.h>
 
 // Função auxiliar para filtro do scandir (movida do game.c)
 int filter_levels(const struct dirent *entry) {
@@ -265,5 +262,31 @@ int load_level(board_t* board, const char* dir_path, const char* level_file, int
         board->board[get_board_index(board, sx, sy)].content = 'P';
     }
 
+    // Inicializar o Mutex
+    if (pthread_mutex_init(&board->board_lock, NULL) != 0) {
+        perror("Falha ao iniciar mutex");
+        return -1;
+    }
+    
+    board->game_running = 1;      // Marcar jogo como ativo
+    board->next_pacman_cmd = '\0'; // Limpar comando
+
     return 0;
+}
+
+void unload_level(board_t * board) {
+    // 1. Destruir o Mutex
+    pthread_mutex_destroy(&board->board_lock);
+
+    // 2. Libertar memória
+    if (board->board) free(board->board);
+    if (board->pacmans) free(board->pacmans);
+    if (board->ghosts) free(board->ghosts);
+    
+    // 3. Limpar ponteiros
+    board->board = NULL;
+    board->pacmans = NULL;
+    board->ghosts = NULL;
+    board->n_ghosts = 0;
+    board->n_pacmans = 0;
 }

@@ -168,7 +168,6 @@ char get_input() {
         case 'D':
         case 'Q':
         case 'G':
-        case 'C': // 
             return (char)ch;
         
         default:

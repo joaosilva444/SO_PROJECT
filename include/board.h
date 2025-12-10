@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <pthread.h>
 
 #define MAX_MOVES 100 // Aumentado para suportar ficheiros maiores
 #define MAX_LEVELS 20
@@ -62,6 +63,12 @@ typedef struct {
     char pacman_file[256];  
     char ghosts_files[MAX_GHOSTS][256]; 
     int tempo;              
+    
+    // --- NOVO EXERCÍCIO 3 ---
+    pthread_mutex_t board_lock; // O cadeado para proteger o tabuleiro
+    int game_running;           // Flag: 1 = Jogo corre, 0 = Jogo deve parar
+    char next_pacman_cmd;       // Comunicação entre Main (Teclado) e Thread Pacman
+    // ------------------------
 } board_t;
 
 /*Makes the current thread sleep for 'int milliseconds' miliseconds*/
@@ -78,12 +85,10 @@ void kill_pacman(board_t* board, int pacman_index);
    dir_path: path to the directory containing the files
    level_file: name of the .lvl file
 */
-int load_level(board_t* board, const char* dir_path, const char* level_file, int accumulated_points);
 
 int get_board_index(board_t* board, int x, int y);
 
 /*Unloads levels loaded by load_level*/
-void unload_level(board_t * board);
 
 // DEBUG FILE
 void open_debug_file(char *filename);
