@@ -8,6 +8,7 @@
 #include <dirent.h> 
 #include <sys/wait.h>  // Necessário para waitpid
 #include <sys/types.h> // Necessário para pid_t
+#include "files.h"
 
 // Códigos de saída para comunicação Processo Filho -> Processo Pai
 #define EXIT_RESTORE 10   // Filho morreu, Pai deve restaurar
@@ -25,14 +26,6 @@ int has_active_save = 0;
 #define QUIT_GAME 2
 #define EXIT_RESTORE 10
 
-// Função de filtro para scandir
-int filter_levels(const struct dirent *entry) {
-    const char *dot = strrchr(entry->d_name, '.');
-    if (dot && strcmp(dot, ".lvl") == 0) {
-        return 1;
-    }
-    return 0;
-}
 
 void screen_refresh(board_t * game_board, int mode) {
     debug("REFRESH\n");

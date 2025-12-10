@@ -15,7 +15,7 @@ TARGET = Pacmanist
 
 # Objects variables
 # ADICIONADO: loader.o à lista de objetos
-OBJS = game.o display.o board.o
+OBJS = game.o display.o board.o files.o
 
 # Dependencies
 # Estas variáveis são expandidas na regra de compilação %.o
@@ -24,6 +24,7 @@ OBJS = game.o display.o board.o
 
 display.o = display.h board.h
 board.o = board.h
+files.o = files.h
 
 
 # Object files path

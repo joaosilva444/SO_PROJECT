@@ -80,6 +80,8 @@ void kill_pacman(board_t* board, int pacman_index);
 */
 int load_level(board_t* board, const char* dir_path, const char* level_file, int accumulated_points);
 
+int get_board_index(board_t* board, int x, int y);
+
 /*Unloads levels loaded by load_level*/
 void unload_level(board_t * board);
 
