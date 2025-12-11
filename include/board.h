@@ -67,7 +67,8 @@ typedef struct {
     // --- NOVO EXERCÍCIO 3 ---
     pthread_mutex_t board_lock; // O cadeado para proteger o tabuleiro
     int game_running;           // Flag: 1 = Jogo corre, 0 = Jogo deve parar
-    char next_pacman_cmd;       // Comunicação entre Main (Teclado) e Thread Pacman
+    char next_pacman_cmd; 
+    int save_request;      // Comunicação entre Main (Teclado) e Thread Pacman
     // ------------------------
 
     int exit_status;
