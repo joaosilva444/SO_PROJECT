@@ -21,10 +21,24 @@ typedef struct {
     int id; // Índice do fantasma
 } thread_arg_t;
 
+void lock_all_rows(board_t* board) {
+    // Ordem crescente obrigatória
+    for (int i = 0; i < board->height; i++) {
+        pthread_mutex_lock(&board->row_locks[i]);
+    }
+}
+
+void unlock_all_rows(board_t* board) {
+    for (int i = 0; i < board->height; i++) {
+        pthread_mutex_unlock(&board->row_locks[i]);
+    }
+}
 void screen_refresh(board_t * game_board, int mode) {
+    if (mode == DRAW_MENU) lock_all_rows(game_board);
     debug("REFRESH\n");
     draw_board(game_board, mode);
     refresh_screen();
+    if (mode == DRAW_MENU) unlock_all_rows(game_board);
     if(game_board->tempo != 0)
         sleep_ms(game_board->tempo);       
 }
@@ -46,12 +60,10 @@ void* ghost_thread(void* arg) {
         int sleep_time = (board->tempo > 0) ? board->tempo : 100;
         sleep_ms(sleep_time);
 
-        // 2. Bloquear Tabuleiro
-        pthread_mutex_lock(&board->board_lock);
+        // CORREÇÃO: Removido lock_all_rows daqui. O move_ghost trata dos locks.
 
         // Verificar se jogo acabou enquanto dormia
         if (!board->game_running) {
-            pthread_mutex_unlock(&board->board_lock);
             break;
         }
 
@@ -66,9 +78,6 @@ void* ghost_thread(void* arg) {
             cmd.command = opts[rand() % 4];
             move_ghost(board, ghost_idx, &cmd);
         }
-
-        // 4. Desbloquear
-        pthread_mutex_unlock(&board->board_lock);
     }
     return NULL;
 }
@@ -85,10 +94,9 @@ void* pacman_thread(void* arg) {
         // Sleep pequeno para não "queimar" CPU
         sleep_ms(10); 
 
-        pthread_mutex_lock(&board->board_lock);
+        // CORREÇÃO: Removido lock_all_rows daqui. O move_pacman trata dos locks.
 
         if (!board->game_running) {
-            pthread_mutex_unlock(&board->board_lock);
             break;
         }
 
@@ -120,10 +128,11 @@ void* pacman_thread(void* arg) {
              
              // Caso 1: SAVE (G)
              if (cmd.command == 'G') {
-                 board->save_request = 1; // Ativa a flag criada no passo anterior
-                 self->current_move++;    // Avança para não ficar preso no G
-                 pthread_mutex_unlock(&board->board_lock); 
-                 sleep_ms(50);            // Dá tempo à Main para processar
+                 if (!has_active_save) { // Só pede save se nao houver um ativo
+                     board->save_request = 1; 
+                 }
+                 self->current_move++;    
+                 sleep_ms(50);            
                  continue; 
              }
              
@@ -131,7 +140,6 @@ void* pacman_thread(void* arg) {
              if (cmd.command == 'Q') {
                  board->exit_status = 3;  // Código de saída 3 = QUIT
                  board->game_running = 0; // Para todas as threads
-                 pthread_mutex_unlock(&board->board_lock);
                  break; // Sai imediatamente do while da thread
              }
              // -----------------------------------------------
@@ -154,8 +162,6 @@ void* pacman_thread(void* arg) {
              board->game_running = 0;
         }
 
-        pthread_mutex_unlock(&board->board_lock);
-        
         // Se houve movimento automático, esperar o TEMPO do jogo
         if (moved && self->n_moves > 0) sleep_ms(board->tempo);
     }
@@ -186,12 +192,8 @@ int main(int argc, char** argv) {
             free(namelist[i]); continue;
         }
 
-        // --- INICIALIZAÇÃO PARA THREADS ---
-        pthread_mutex_init(&game_board.board_lock, NULL);
-        game_board.game_running = 1;
-        game_board.exit_status = 0;
-        game_board.next_pacman_cmd = '\0';
-
+        // --- INICIALIZAÇÃO ---
+        
         pthread_t p_thread;
         pthread_t g_threads[MAX_GHOSTS];
 
@@ -204,88 +206,93 @@ int main(int argc, char** argv) {
             pthread_create(&g_threads[g], NULL, ghost_thread, args);
         }
 
-        draw_board(&game_board, DRAW_MENU);
+        screen_refresh(&game_board, DRAW_MENU);
 
         // --- LOOP PRINCIPAL (UI & INPUT) ---
         while (game_board.game_running) {
-            // 1. Desenhar (Protegido por Mutex)
-            pthread_mutex_lock(&game_board.board_lock);
-            draw_board(&game_board, DRAW_MENU);
-            pthread_mutex_unlock(&game_board.board_lock);
-            refresh_screen();
+            
+            // 1. Desenhar (Usando helper para bloquear estado)
+            screen_refresh(&game_board, DRAW_MENU);
 
             // 2. Input
             char input = get_input();
 
             // =======================================================
-            // LÓGICA DE SAVE (G) COM THREADS
+            // LÓGICA DE SAVE (G) - TECLADO OU FICHEIRO
             // =======================================================
-            if ((input == 'G'|| game_board.save_request) && has_active_save == 0) {
-                // Bloqueia TUDO para garantir que o save é consistente 
-                game_board.save_request=0;
-                pthread_mutex_lock(&game_board.board_lock);
+            if ((input == 'G' || game_board.save_request) && has_active_save == 0) {
+                
+                game_board.save_request = 0; // Limpar bandeira
+
+                // 1. BLOQUEAR O PAI (STOP THE WORLD)
+                lock_all_rows(&game_board);
                 
                 pid_t pid = fork();
 
                 if (pid < 0) {
                     perror("Erro fork");
-                    pthread_mutex_unlock(&game_board.board_lock);
+                    unlock_all_rows(&game_board);
                 }
                 else if (pid > 0) {
+                    // === PROCESSO PAI (Wait & Freeze) ===
                     
                     int status;
-                    waitpid(pid, &status, 0); // Espera pelo filho
+                    waitpid(pid, &status, 0); 
 
+                    // O Filho terminou. O Pai acorda.
+                    
                     if (WIFEXITED(status)) {
                         int exit_code = WEXITSTATUS(status);
                         
                         if (exit_code == EXIT_RESTORE) {
-                            // Filho morreu -> Restaurar
+                            // Restaurar
                             has_active_save = 0;
                             clear(); refresh();
-                            pthread_mutex_unlock(&game_board.board_lock);
-                            continue; // Volta ao loop (Threads do pai continuam vivas)
+
+                            // Soltamos as threads do Pai para continuarem do ponto 'G'
+                            unlock_all_rows(&game_board);
+                            
+                            continue; // Volta ao início do loop
                         }
                         else if (exit_code == EXIT_GAME_OVER) {
-                            // Filho fez Quit -> Pai também sai
+                            // Quit no filho
                             game_board.exit_status = 3;
                             game_board.game_running = 0;
                         }
                     }
-                    pthread_mutex_unlock(&game_board.board_lock);
+                    // Libertar o lock se não for restore
+                    unlock_all_rows(&game_board);
                 }
                 else {
-                    // === FILHO (Jogo Ativo) ===
-                    // IMPORTANTE: Aqui só existe a thread MAIN. As outras morreram.
+                    // === PROCESSO FILHO (Jogo Ativo) ===
                     
-                    // 1. Corrigir Mutex (pode ter vindo bloqueado do pai)
-                    pthread_mutex_unlock(&game_board.board_lock);
+                    // O filho herda o mutex TRANCADO. Destrancar IMEDIATAMENTE.
+                    unlock_all_rows(&game_board);
                     
                     has_active_save = 1;
+
+                    // Reiniciar ncurses para o filho (CRÍTICO)
                     nodelay(stdscr, TRUE);
                     keypad(stdscr, TRUE);
                     
-                    // 2. RECRIAR AS THREADS NO FILHO
-                    // Sem isto, o jogo para no filho porque não há threads a mexer os bonecos
+                    // Recriar as threads no filho (apenas a main sobreviveu ao fork)
                     pthread_create(&p_thread, NULL, pacman_thread, &game_board);
-
                     for(int g=0; g < game_board.n_ghosts; g++) {
                         thread_arg_t* args = malloc(sizeof(thread_arg_t));
                         args->board = &game_board;
                         args->id = g;
                         pthread_create(&g_threads[g], NULL, ghost_thread, args);
                     }
-                    // O filho continua o loop while e joga normalmente
                 }
             }
             // =======================================================
             // LÓGICA DE QUIT (Q)
             // =======================================================
             else if (input == 'Q') {
-                pthread_mutex_lock(&game_board.board_lock);
-                game_board.exit_status = 3; // QUIT
+                lock_all_rows(&game_board);
+                game_board.exit_status = 3; 
                 game_board.game_running = 0;
-                pthread_mutex_unlock(&game_board.board_lock);
+                unlock_all_rows(&game_board);
                 
                 if (has_active_save) exit(EXIT_GAME_OVER);
             } 
@@ -293,7 +300,6 @@ int main(int argc, char** argv) {
             // INPUT DE MOVIMENTO (WASD)
             // =======================================================
             else if (input != '\0') {
-                // Passa o comando para a thread do Pacman executar
                 game_board.next_pacman_cmd = input;
             }
 
@@ -302,13 +308,11 @@ int main(int argc, char** argv) {
 
         // --- FIM DO NÍVEL / JOGO ---
         
-        // Esperar threads terminarem
         pthread_join(p_thread, NULL);
         for(int g=0; g < game_board.n_ghosts; g++) {
             pthread_join(g_threads[g], NULL);
         }
-        pthread_mutex_destroy(&game_board.board_lock);
-
+        
         int status = game_board.exit_status;
 
         // SE SOU FILHO E MORRI -> AVISAR PAI
@@ -330,7 +334,6 @@ int main(int argc, char** argv) {
                 screen_refresh(&game_board, DRAW_GAME_OVER);
                 sleep_ms(2000);
             }
-            // Se for Quit (3), sai direto sem Game Over, ou mostra msg se quiseres
             
             unload_level(&game_board);
             free(namelist[i]);
@@ -339,7 +342,6 @@ int main(int argc, char** argv) {
     }
     
     // Limpeza final
-    for (int k = 0; k < n; k++) { /* ... */ } // (Opcional: free do resto)
     free(namelist);
     terminal_cleanup();
     close_debug_file();

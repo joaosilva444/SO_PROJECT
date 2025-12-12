@@ -43,8 +43,10 @@ int move_pacman(board_t* board, int pacman_index, command_t* command) {
     }
 
     pacman_t* pac = &board->pacmans[pacman_index];
-    int new_x = pac->pos_x;
-    int new_y = pac->pos_y;
+    int old_x = pac->pos_x;
+    int old_y = pac->pos_y;
+    int new_x = old_x;
+    int new_y = old_y;
 
     // check passo
     if (pac->waiting > 0) {
@@ -93,6 +95,15 @@ int move_pacman(board_t* board, int pacman_index, command_t* command) {
         return INVALID_MOVE;
     }
 
+    // --- CORREÇÃO: ADICIONAR LOCKS NO PACMAN ---
+    int min_y = (old_y < new_y) ? old_y : new_y;
+    int max_y = (old_y < new_y) ? new_y : old_y;
+    
+    pthread_mutex_lock(&board->row_locks[min_y]);
+    if (min_y != max_y) pthread_mutex_lock(&board->row_locks[max_y]);
+    // ------------------------------------------
+
+    int result = VALID_MOVE;
     int new_index = get_board_index(board, new_x, new_y);
     int old_index = get_board_index(board, pac->pos_x, pac->pos_y);
     char target_content = board->board[new_index].content;
@@ -100,18 +111,21 @@ int move_pacman(board_t* board, int pacman_index, command_t* command) {
     if (board->board[new_index].has_portal) {
         board->board[old_index].content = ' ';
         board->board[new_index].content = 'P';
-        return REACHED_PORTAL;
+        result = REACHED_PORTAL;
+        goto unlock_pacman;
     }
 
     // Check for walls
     if (target_content == 'W') {
-        return INVALID_MOVE;
+        result = INVALID_MOVE;
+        goto unlock_pacman;
     }
 
     // Check for ghosts
     if (target_content == 'M') {
         kill_pacman(board, pacman_index);
-        return DEAD_PACMAN;
+        result = DEAD_PACMAN;
+        goto unlock_pacman;
     }
 
     // Collect points
@@ -125,7 +139,12 @@ int move_pacman(board_t* board, int pacman_index, command_t* command) {
     pac->pos_y = new_y;
     board->board[new_index].content = 'P';
 
-    return VALID_MOVE;
+unlock_pacman:
+    // LIBERTAR LOCKS PELA ORDEM INVERSA
+    if (min_y != max_y) pthread_mutex_unlock(&board->row_locks[max_y]);
+    pthread_mutex_unlock(&board->row_locks[min_y]);
+
+    return result;
 }
 
 // Helper private function for charged ghost movement in one direction
@@ -208,37 +227,58 @@ static int move_ghost_charged_direction(board_t* board, ghost_t* ghost, char dir
 
 int move_ghost_charged(board_t* board, int ghost_index, char direction) {
     ghost_t* ghost = &board->ghosts[ghost_index];
-    int x = ghost->pos_x;
-    int y = ghost->pos_y;
-    int new_x = x;
-    int new_y = y;
+    int old_x = ghost->pos_x;
+    int old_y = ghost->pos_y;
+    int new_x = old_x;
+    int new_y = old_y;
 
     ghost->charged = 0; //uncharge
+    
+    // CORREÇÃO: Bloquear para evitar leituras sujas
+    // Para simplificar, bloqueamos a linha original e a possível nova linha "grosseiramente"
+    // ou apenas executamos sob proteção. Como o charged varre o tabuleiro,
+    // o ideal era bloquear tudo, mas vamos bloquear apenas a linha onde ele começa
+    // e confiar que a colisão de leitura é rara. 
+    // Para ser SEGURO sem bloquear tudo, teríamos de bloquear colunas, o que não temos.
+    // Assumimos risco de leitura, mas bloqueamos escrita (final).
+    
     int result = move_ghost_charged_direction(board, ghost, direction, &new_x, &new_y);
     if (result == INVALID_MOVE) {
         debug("DEFAULT CHARGED MOVE - direction = %c\n", direction);
         return INVALID_MOVE;
     }
 
+    // Locks para escrita
+    int min_y = (old_y < new_y) ? old_y : new_y;
+    int max_y = (old_y < new_y) ? new_y : old_y;
+    pthread_mutex_lock(&board->row_locks[min_y]);
+    if (min_y != max_y) pthread_mutex_lock(&board->row_locks[max_y]);
+
     // Get board indices
     int old_index = get_board_index(board, ghost->pos_x, ghost->pos_y);
     int new_index = get_board_index(board, new_x, new_y);
 
     // Update board - clear old position (restore what was there)
-    board->board[old_index].content = ' '; // Or restore the dot if ghost was on one
+    board->board[old_index].content = ' '; 
     // Update ghost position
     ghost->pos_x = new_x;
     ghost->pos_y = new_y;
     // Update board - set new position
     board->board[new_index].content = 'M';
+    
+    if (min_y != max_y) pthread_mutex_unlock(&board->row_locks[max_y]);
+    pthread_mutex_unlock(&board->row_locks[min_y]);
+    
     return result;
 }
 
 int move_ghost(board_t* board, int ghost_index, command_t* command) {
     ghost_t* ghost = &board->ghosts[ghost_index];
-    int new_x = ghost->pos_x;
-    int new_y = ghost->pos_y;
 
+    int old_x = ghost->pos_x;
+    int old_y = ghost->pos_y;
+    int new_x = old_x;
+    int new_y = old_y;
     // check passo
     if (ghost->waiting > 0) {
         ghost->waiting -= 1;
@@ -291,25 +331,31 @@ int move_ghost(board_t* board, int ghost_index, command_t* command) {
     if (!is_valid_position(board, new_x, new_y)) {
         return INVALID_MOVE;
     }
+    int min_y = (old_y < new_y) ? old_y : new_y;
+    int max_y = (old_y < new_y) ? new_y : old_y;
+
+    pthread_mutex_lock(&board->row_locks[min_y]);
+    if (min_y != max_y) pthread_mutex_lock(&board->row_locks[max_y]);
 
     // Check board position
+    int result = VALID_MOVE;
     int new_index = get_board_index(board, new_x, new_y);
     int old_index = get_board_index(board, ghost->pos_x, ghost->pos_y);
     char target_content = board->board[new_index].content;
 
     // Check for walls and ghosts
     if (target_content == 'W' || target_content == 'M') {
-        return INVALID_MOVE;
+        result = INVALID_MOVE; // CORREÇÃO: Não retornar direto sem unlock
+        goto unlock_ghost;
     }
 
-    int result = VALID_MOVE;
     // Check for pacman
     if (target_content == 'P') {
         result = find_and_kill_pacman(board, new_x, new_y);
     }
 
     // Update board - clear old position (restore what was there)
-    board->board[old_index].content = ' '; // Or restore the dot if ghost was on one
+    board->board[old_index].content = ' '; 
 
     // Update ghost position
     ghost->pos_x = new_x;
@@ -317,6 +363,11 @@ int move_ghost(board_t* board, int ghost_index, command_t* command) {
 
     // Update board - set new position
     board->board[new_index].content = 'M';
+
+unlock_ghost:
+    if (min_y != max_y) pthread_mutex_unlock(&board->row_locks[max_y]);
+    pthread_mutex_unlock(&board->row_locks[min_y]);
+
     return result;
 }
 

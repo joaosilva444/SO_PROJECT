@@ -70,8 +70,9 @@ typedef struct {
     char next_pacman_cmd; 
     int save_request;      // Comunicação entre Main (Teclado) e Thread Pacman
     // ------------------------
-
     int exit_status;
+    pthread_mutex_t* row_locks; // Array dinâmico: tamanho = board->height
+    pthread_mutex_t global_stats_lock;
 } board_t;
 
 /*Makes the current thread sleep for 'int milliseconds' miliseconds*/

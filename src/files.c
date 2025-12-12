@@ -263,11 +263,12 @@ int load_level(board_t* board, const char* dir_path, const char* level_file, int
     }
 
     // Inicializar o Mutex
-    if (pthread_mutex_init(&board->board_lock, NULL) != 0) {
-        perror("Falha ao iniciar mutex");
-        return -1;
+    board->row_locks = malloc(sizeof(pthread_mutex_t) * board->height);
+    for (int i = 0; i < board->height; i++) {
+        pthread_mutex_init(&board->row_locks[i], NULL);
     }
-    
+    pthread_mutex_init(&board->global_stats_lock, NULL);
+    board->save_request = 0;    
     board->game_running = 1;      // Marcar jogo como ativo
     board->next_pacman_cmd = '\0'; // Limpar comando
     board->exit_status = 0;
@@ -276,15 +277,25 @@ int load_level(board_t* board, const char* dir_path, const char* level_file, int
 }
 
 void unload_level(board_t * board) {
-    // 1. Destruir o Mutex
-    pthread_mutex_destroy(&board->board_lock);
+    if (!board) return;
 
-    // 2. Libertar memória
+    // 1. Destruir e libertar mutexes das linhas
+    if (board->row_locks) {
+        for (int i = 0; i < board->height; i++) {
+            pthread_mutex_destroy(&board->row_locks[i]);
+        }
+        free(board->row_locks);
+        board->row_locks = NULL;
+    }
+
+    // 2. Destruir mutex global
+    pthread_mutex_destroy(&board->global_stats_lock);
+
+    // 3. Libertar o resto (como já tinhas)
     if (board->board) free(board->board);
     if (board->pacmans) free(board->pacmans);
     if (board->ghosts) free(board->ghosts);
     
-    // 3. Limpar ponteiros
     board->board = NULL;
     board->pacmans = NULL;
     board->ghosts = NULL;
